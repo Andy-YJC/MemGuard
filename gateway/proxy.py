@@ -26,23 +26,23 @@ from typing import Any, Optional, Protocol
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from audit.audit_log import StructuredAuditLogger
-from config import settings
-from db.chroma_wrapper import ChromaWrapper
-from gateway.filters import SyncFilter
-from gateway.immune_client import (
+from ..audit.audit_log import StructuredAuditLogger
+from ..config import settings
+from ..db.chroma_wrapper import ChromaWrapper
+from .filters import SyncFilter
+from .immune_client import (
     ActiveImmunity,
     DualMemoryBank,
     ImmuneDetector,
 )
-from models.memory_entry import (
+from ..models.memory_entry import (
     AuditEvent,
     AuditEventType,
     KeyManager,
     MemoryEntry,
     SourceType,
 )
-from scanner.periodic_scanner import PeriodicScanner
+from ..scanner.periodic_scanner import PeriodicScanner
 
 
 # ── MemoryStore protocol (implemented by ChromaWrapper in Task 4) ─────────────

@@ -1,6 +1,6 @@
-from gateway.filters import FilterResult, SyncFilter
-from gateway.immune_client import ActivationBank, ImmuneDetector, ImmuneResult
-from gateway.proxy import app
+from .filters import FilterResult, SyncFilter
+from .immune_client import ActivationBank, ImmuneDetector, ImmuneResult
+from .proxy import app
 
 __all__ = [
     "FilterResult",

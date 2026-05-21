@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from models.memory_entry import AuditEventType, MemoryEntry, SourceType
-from scanner.constitutional import DangerMatch, fast_danger_check
-from scanner.periodic_scanner import PeriodicScanner, ProbeResult, ScanReport
+from ..models.memory_entry import AuditEventType, MemoryEntry, SourceType
+from ..scanner.constitutional import DangerMatch, fast_danger_check
+from ..scanner.periodic_scanner import PeriodicScanner, ProbeResult, ScanReport
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -300,7 +300,7 @@ async def test_scan_once_produces_report() -> None:
 async def test_already_scanned_entries_are_skipped() -> None:
     entry = _make_entry("already checked content")
     # Simulate a prior SHADOW_EXEC_SAFE event
-    from models.memory_entry import AuditEvent, AuditEventType
+    from ..models.memory_entry import AuditEvent, AuditEventType
     entry.add_audit_event(AuditEvent(
         event_type=AuditEventType.SHADOW_EXEC_SAFE,
         actor="scanner.periodic",

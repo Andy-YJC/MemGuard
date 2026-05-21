@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from models.memory_entry import AuditEvent, MemoryEntry
+from ..models.memory_entry import AuditEvent, MemoryEntry
 
 _LOGGER = logging.getLogger("memguard.audit")
 

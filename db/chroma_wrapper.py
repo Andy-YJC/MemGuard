@@ -27,16 +27,14 @@ Usage:
 from __future__ import annotations
 
 import json
-import threading
-import time
-from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
-from models.memory_entry import MemoryEntry
+from ..models.memory_entry import MemoryEntry, SourceType
 
 
 class ChromaWrapper:
@@ -47,9 +45,6 @@ class ChromaWrapper:
     verbatim in ChromaDB's metadata dict, making them queryable via ChromaDB's
     `where` filter API.
     """
-
-    _WRITE_RETRIES = 3
-    _RETRY_BASE_SECONDS = 0.05
 
     def __init__(
         self,
@@ -62,7 +57,6 @@ class ChromaWrapper:
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
-        self._init_locks()
 
     @classmethod
     def ephemeral(cls, collection_name: str = "agent_memory") -> "ChromaWrapper":
@@ -78,27 +72,7 @@ class ChromaWrapper:
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
-        instance._init_locks()
         return instance
-
-    def _init_locks(self) -> None:
-        # Serialize writes for the same entry_id within this process.
-        # This avoids local write races (read-modify-write interleaving).
-        self._locks_guard = threading.Lock()
-        self._entry_locks: dict[str, threading.RLock] = {}
-
-    @contextmanager
-    def _entry_lock(self, entry_id: str) -> Iterator[None]:
-        with self._locks_guard:
-            lock = self._entry_locks.get(entry_id)
-            if lock is None:
-                lock = threading.RLock()
-                self._entry_locks[entry_id] = lock
-        lock.acquire()
-        try:
-            yield
-        finally:
-            lock.release()
 
     # ── MemoryStoreProtocol ───────────────────────────────────────────────────
 
@@ -109,52 +83,11 @@ class ChromaWrapper:
         from entry.to_chroma_document() — no manual metadata wiring needed.
         """
         doc = entry.to_chroma_document()
-        entry_id = doc["id"]
-
-        with self._entry_lock(entry_id):
-            for attempt in range(1, self._WRITE_RETRIES + 1):
-                try:
-                    existing = self._collection.get(
-                        ids=[entry_id],
-                        include=["documents", "metadatas"],
-                    )
-                    existing_ids = existing.get("ids") or []
-
-                    if not existing_ids:
-                        # Prefer explicit add for new records. This avoids relying on
-                        # any backend-specific upsert internals.
-                        self._collection.add(
-                            ids=[entry_id],
-                            documents=[doc["document"]],
-                            metadatas=[doc["metadata"]],
-                        )
-                        return
-
-                    current_doc = (existing.get("documents") or [None])[0]
-                    current_meta = (existing.get("metadatas") or [None])[0]
-                    if current_doc == doc["document"] and current_meta == doc["metadata"]:
-                        return  # idempotent no-op
-
-                    self._collection.update(
-                        ids=[entry_id],
-                        documents=[doc["document"]],
-                        metadatas=[doc["metadata"]],
-                    )
-                    return
-                except Exception:
-                    # Race-safe fallback: if another writer inserted the same ID
-                    # between get() and add(), update() should succeed.
-                    try:
-                        self._collection.update(
-                            ids=[entry_id],
-                            documents=[doc["document"]],
-                            metadatas=[doc["metadata"]],
-                        )
-                        return
-                    except Exception:
-                        if attempt == self._WRITE_RETRIES:
-                            raise
-                        time.sleep(self._RETRY_BASE_SECONDS * attempt)
+        self._collection.upsert(
+            ids=[doc["id"]],
+            documents=[doc["document"]],
+            metadatas=[doc["metadata"]],
+        )
 
     def get(self, entry_id: str) -> Optional[MemoryEntry]:
         """Fetch a single entry by ID. Returns None if not found."""
@@ -176,13 +109,12 @@ class ChromaWrapper:
         Quarantine an entry: fetch → apply quarantine mutation → re-upsert.
         This preserves the full audit trail in the ChromaDB metadata field.
         """
-        with self._entry_lock(entry_id):
-            entry = self.get(entry_id)
-            if entry is None:
-                return
-            if is_unsafe:
-                entry.quarantine(actor="db.chroma_wrapper", reason=reason)
-            self.upsert(entry)
+        entry = self.get(entry_id)
+        if entry is None:
+            return
+        if is_unsafe:
+            entry.quarantine(actor="db.chroma_wrapper", reason=reason)
+        self.upsert(entry)
 
     def query(
         self,

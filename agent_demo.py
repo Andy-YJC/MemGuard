@@ -10,8 +10,8 @@ memguard 真实 Agent 接入演示
 前置：
   1. cp .env.example .env  并填入 OPENAI_API_KEY
   2. pip install -r requirements.txt
-  3. 另开终端：uvicorn memguard.gateway.proxy:app --port 8080
-  4. python memguard/agent_demo.py
+  3. 另开终端：python -m uvicorn memg.gateway.proxy:app --port 8080
+  4. python memg/agent_demo.py
 """
 
 import asyncio
@@ -19,6 +19,10 @@ import json
 
 import httpx
 from openai import AsyncOpenAI
+
+import os
+import dotenv
+dotenv.load_dotenv()
 
 GATEWAY = "http://localhost:8080"
 SESSION = "agent_demo_session"
@@ -32,7 +36,7 @@ CYAN  = "\033[36m"
 YELLOW = "\033[33m"
 RESET = "\033[0m"
 
-llm = AsyncOpenAI()
+llm = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'),base_url=os.getenv('OPENAI_BASE_URL'))
 
 
 # ── 网关操作 ──────────────────────────────────────────────────────────────────

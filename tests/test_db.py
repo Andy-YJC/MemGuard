@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from db.chroma_wrapper import ChromaWrapper
-from db.lance_wrapper import LanceWrapper
-from models.memory_entry import MemoryEntry, SourceType
+from ..db.chroma_wrapper import ChromaWrapper
+from ..db.lance_wrapper import LanceWrapper
+from ..models.memory_entry import MemoryEntry, SourceType
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────

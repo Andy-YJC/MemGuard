@@ -1,4 +1,4 @@
-from memguard.models.memory_entry import (
+from .memory_entry import (
     AuditEvent,
     AuditEventType,
     KeyManager,

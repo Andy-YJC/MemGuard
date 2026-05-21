@@ -8,7 +8,7 @@ import hashlib
 
 import pytest
 
-from models.memory_entry import (
+from ..models.memory_entry import (
     AuditEvent,
     AuditEventType,
     KeyManager,

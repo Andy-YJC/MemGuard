@@ -33,7 +33,12 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 import numpy as np
+
 from openai import AsyncOpenAI
+import os
+import dotenv
+dotenv.load_dotenv()  # 这会自动查找当前目录或父目录的 .env 文件
+
 
 # ── Safety policies from IMAG paper (Figure 2 / §3.4) ────────────────────────
 
@@ -241,6 +246,10 @@ class DualMemoryBank:
         return len(self._short_term)
 
 
+# Backward compatibility: ActivationBank is now DualMemoryBank
+ActivationBank = DualMemoryBank
+
+
 # ── SVD helper ────────────────────────────────────────────────────────────────
 
 
@@ -289,7 +298,7 @@ class ImmuneDetector:
         self._model = model
         self._threshold = threshold
         self._top_k = top_k
-        self._client = AsyncOpenAI()
+        self._client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"),base_url=os.getenv("OPENAI_BASE_URL"))
 
     async def embed(self, text: str) -> list[float]:
         """Return the embedding vector for text via OpenAI Embeddings API."""

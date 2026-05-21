@@ -17,6 +17,7 @@ with [TYPE_REDACTED] placeholders before the MemoryEntry is created.
 
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -30,40 +31,77 @@ class FilterResult:
 class SyncFilter:
     """Synchronous content filter: injection detection + PII masking."""
 
-    # ── PII patterns (warn + mask, do not block) ──────────────────────────────
-    _PII: dict[str, re.Pattern] = {
-        "EMAIL":       re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", re.I),
-        "PHONE_US":    re.compile(r"\b(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
-        "CREDIT_CARD": re.compile(r"\b\d{4}[\ \-]?\d{4}[\ \-]?\d{4}[\ \-]?\d{4}\b"),
-        "SSN":         re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
-        "IPV4":        re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
-    }
+    def __init__(
+        self,
+        pii_patterns: Optional[dict[str, str]] = None,
+        injection_patterns: Optional[list[tuple[str, str]]] = None,
+        extra_pii_patterns: Optional[dict[str, str]] = None,
+        extra_injection_patterns: Optional[list[tuple[str, str]]] = None,
+        block_on_pii: bool = False,
+    ):
+        self._PII = self._build_pii_patterns(pii_patterns, extra_pii_patterns)
+        self._INJECTIONS = self._build_injection_patterns(
+            injection_patterns,
+            extra_injection_patterns,
+        )
+        self._block_on_pii = block_on_pii
 
-    # ── Injection patterns (block immediately) ────────────────────────────────
-    _INJECTIONS: list[tuple[re.Pattern, str]] = [
-        # Classic instruction-override attacks (MINJA family)
-        (re.compile(r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions", re.I),
-         "injection:ignore_instructions"),
-        (re.compile(r"disregard\s+(all\s+)?(previous|prior|above)\s+instructions", re.I),
-         "injection:disregard_instructions"),
-        (re.compile(r"forget\s+(all\s+)?(previous|prior|above)\s+instructions", re.I),
-         "injection:forget_instructions"),
-        # Jailbreak modes
-        (re.compile(r"\bdan\s+mode\b", re.I),                "jailbreak:dan_mode"),
-        (re.compile(r"\bdeveloper\s+mode\b", re.I),           "jailbreak:developer_mode"),
-        (re.compile(r"\bdo\s+anything\s+now\b", re.I),        "jailbreak:do_anything_now"),
-        (re.compile(r"\bjailbreak\b", re.I),                  "jailbreak:explicit"),
-        # Persona override / evil-AI prompts
-        (re.compile(
-            r"act\s+as\s+(if\s+you\s+(are|were)\s+)?a?\s*(malicious|evil|unrestricted|unfiltered)",
-            re.I),                                             "injection:act_as_evil"),
-        (re.compile(
-            r"you\s+are\s+now\s+a?\s*(different|new|evil|malicious)\s+\w+",
-            re.I),                                             "injection:persona_override"),
-        # Fake system / context tags (MemoryGraft, PoisonedRAG)
-        (re.compile(r"\[SYSTEM\]|\<\s*/?system\s*\>", re.I), "injection:fake_system_tag"),
-        (re.compile(r"system\s+prompt\s*[:=]", re.I),         "injection:system_prompt_override"),
-    ]
+    @staticmethod
+    def _build_pii_patterns(
+        pii_patterns: Optional[dict[str, str]],
+        extra_pii_patterns: Optional[dict[str, str]],
+    ) -> dict[str, re.Pattern]:
+        patterns = pii_patterns or {
+            "EMAIL":       r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+            "PHONE_CN":    r"(?<!\d)(?:\+?86[-.\s]?)?1[3-9]\d(?:[-.\s]?\d){9}(?!\d)",
+            "ID_CN":       r"(?<!\d)\d{17}[\dXx](?!\d)",
+            "PHONE_US":    r"\b(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
+            "CREDIT_CARD": r"\b\d{4}[\ \-]?\d{4}[\ \-]?\d{4}[\ \-]?\d{4}\b",
+            "SSN":         r"\b\d{3}-\d{2}-\d{4}\b",
+            "IPV4":        r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b",
+            "IPV6":        r"\b(?:"
+                            r"(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|"
+                            r"(?:[0-9A-Fa-f]{1,4}:){1,7}:|"
+                            r":(?::[0-9A-Fa-f]{1,4}){1,7}|"
+                            r"(?:[0-9A-Fa-f]{1,4}:){1,6}:(?:\d{1,3}\.){3}\d{1,3}|"
+                            r"::(?:ffff(?::0{1,4})?:)?(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}"
+                            r")\b",
+        }
+        if extra_pii_patterns:
+            patterns = {**patterns, **extra_pii_patterns}
+        return {name: re.compile(pattern, re.I) for name, pattern in patterns.items()}
+
+    @staticmethod
+    def _build_injection_patterns(
+        injection_patterns: Optional[list[tuple[str, str]]],
+        extra_injection_patterns: Optional[list[tuple[str, str]]],
+    ) -> list[tuple[re.Pattern, str]]:
+        patterns = injection_patterns or [
+            # Classic instruction-override attacks (MINJA family)
+            (r"(?:ignore|bypass|override|discard|delete|wipe|erase)\s+(?:all\s+)?(?:previous|prior|above|earlier|former|following)\s+instructions?", "injection:ignore_instructions"),
+            (r"(?:disregard|ignore)\s+(?:all\s+)?(?:previous|prior|above|earlier|former|following)\s+instructions?", "injection:disregard_instructions"),
+            (r"(?:forget|drop|remove)\s+(?:all\s+)?(?:previous|prior|above|earlier|former|following)\s+instructions?", "injection:forget_instructions"),
+            (r"(?:new|updated|latest)\s+instructions?\s*[:=\-–—]", "injection:new_instructions"),
+            (r"(?:system|developer|assistant)\s+instructions?\s*(?:take\s+priority|override|supersede|replace)\s*(?:user|prompt)?", "injection:instruction_priority_override"),
+            # Jailbreak modes
+            (r"\bdan(?:\s*[-_]?\s*mode|\s*\d+)?\b", "jailbreak:dan_mode"),
+            (r"\bdeveloper(?:\s*[-_]?\s*mode)?\b", "jailbreak:developer_mode"),
+            (r"\bdo\s+anything\s+now\b|\banything\s+now\s+allowed\b", "jailbreak:do_anything_now"),
+            (r"\bjail\s*break\b|\bjailbroken\b", "jailbreak:explicit"),
+            # Persona override / evil-AI prompts
+            (r"act\s+as\s+(if\s+you\s+(are|were)\s+)?a?\s*(malicious|evil|unrestricted|unfiltered)", "injection:act_as_evil"),
+            (r"you\s+are\s+now\s+a?\s*(different|new|evil|malicious|unfiltered|unrestricted)\s+\w+", "injection:persona_override"),
+            (r"from\s+now\s+on\s*,?\s*you\s+are\s+(?:a|an)?\s*(?:different|new|evil|malicious)\s+\w+", "injection:persona_override_from_now_on"),
+            (r"(?:follow|obey|comply\s+with)\s+(?:the\s+)?(?:new|above|following)\s+instructions?", "injection:follow_new_instructions"),
+            # Fake system / context tags (MemoryGraft, PoisonedRAG)
+            (r"\[\s*SYSTEM\s*\]|\<\s*/?\s*system\s*\>|\{\s*system\s*\}|\(\s*system\s*\)", "injection:fake_system_tag"),
+            (r"\b(?:system|developer|assistant)\s*prompt\s*[:=\-–—]", "injection:system_prompt_override"),
+            (r"\b(?:system|developer|assistant)\s*[:=]\s*", "injection:role_prefix_injection"),
+            (r"(?:^|\n)\s*#+\s*(?:system|developer|assistant)\b", "injection:markdown_role_header"),
+        ]
+        if extra_injection_patterns:
+            patterns = [*patterns, *extra_injection_patterns]
+        return [(re.compile(pattern, re.I), label) for pattern, label in patterns]
 
     # ── Public API ────────────────────────────────────────────────────────────
 

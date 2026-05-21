@@ -1,3 +1,3 @@
-from audit.audit_log import StructuredAuditLogger
+from .audit_log import StructuredAuditLogger
 
 __all__ = ["StructuredAuditLogger"]

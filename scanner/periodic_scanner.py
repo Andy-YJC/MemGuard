@@ -31,9 +31,9 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from openai import AsyncOpenAI
 
-from memguard.audit.audit_log import StructuredAuditLogger
-from memguard.models.memory_entry import AuditEvent, AuditEventType, MemoryEntry
-from memguard.scanner.constitutional import (
+from ..audit.audit_log import StructuredAuditLogger
+from ..models.memory_entry import AuditEvent, AuditEventType, MemoryEntry
+from .constitutional import (
     CONSTITUTIONAL_EVAL_TEMPLATE,
     SAFETY_CONSTITUTION,
     SHADOW_PROBE_TEMPLATES,
@@ -42,8 +42,8 @@ from memguard.scanner.constitutional import (
 )
 
 if TYPE_CHECKING:
-    from memguard.gateway.immune_client import DualMemoryBank, ImmuneDetector
-    from memguard.gateway.proxy import MemoryStoreProtocol
+    from ..gateway.immune_client import DualMemoryBank, ImmuneDetector
+    from ..gateway.proxy import MemoryStoreProtocol
 
 
 # ── Result types ──────────────────────────────────────────────────────────────

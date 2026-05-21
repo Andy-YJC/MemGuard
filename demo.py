@@ -4,9 +4,9 @@ memguard 网关功能演示脚本
 前置条件：
   1. cp .env.example .env  并填入 OPENAI_API_KEY
   2. pip install -r requirements.txt
-  3. 另开一个终端启动网关：uvicorn gateway.proxy:app --port 8080
+  3. 另开一个终端启动网关：python -m uvicorn memg.gateway.proxy:app --port 8080
 
-然后运行：python memguard/demo.py
+然后运行：python memg/demo.py
 """
 
 import json

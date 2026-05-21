@@ -28,7 +28,7 @@ from typing import Optional
 import numpy as np
 import pyarrow as pa
 
-from models.memory_entry import MemoryEntry, SourceType
+from ..models.memory_entry import MemoryEntry, SourceType
 
 # Embedding dimension for placeholder vectors (matches text-embedding-3-small)
 _EMBED_DIM = 1536
