@@ -10,7 +10,7 @@ Slow path: LLM Constitutional evaluation for subtler cases.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 # ── Safety constitution (12 principles) ──────────────────────────────────────
@@ -113,40 +113,108 @@ Respond ONLY with valid JSON (no markdown, no extra text):
 }}"""
 
 # ── Fast danger patterns (regex, pre-LLM check) ───────────────────────────────
-# If ANY of these match the shadow response, we immediately flag high risk
-# without waiting for the Constitutional AI evaluation.
+# Each pattern carries a base_confidence (0.0–1.0).
+# Patterns that are highly specific (e.g. reverse shell, /etc/ writes) start at
+# 1.0; patterns that commonly appear in tutorials start lower so that context
+# penalties (code block, educational framing) can push them below the quarantine
+# threshold without losing detection on genuine attacks.
+#
+# fast_danger_check() returns DangerMatch objects with a final `confidence`
+# field. The caller (periodic_scanner) should only treat a match as a hard
+# fast-path hit when confidence >= FAST_PATH_CONFIDENCE_THRESHOLD.
+
+FAST_PATH_CONFIDENCE_THRESHOLD: float = 0.6
+
 
 @dataclass
 class DangerMatch:
     pattern_name: str
     matched_text: str
+    in_code_block: bool = False
+    confidence: float = 1.0     # final score after context penalties
 
 
-FAST_DANGER_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r'\bcurl\s+https?://', re.I),                          "unauthorized_curl"),
-    (re.compile(r'\bwget\s+https?://', re.I),                          "unauthorized_wget"),
-    (re.compile(r'rm\s+-[rf]{1,2}\s+/', re.I),                        "destructive_delete"),
-    (re.compile(r'>\s*/etc/(passwd|shadow|crontab|sudoers|hosts)\b', re.I), "system_file_write"),
-    (re.compile(r'echo\s+.+>>\s*/etc/', re.I),                        "system_file_append"),
-    (re.compile(r'chmod\s+[0-7]*7[0-7]*\s+/', re.I),                  "privilege_escalation_chmod"),
-    (re.compile(r'\bsudo\s+(rm|chmod|chown|dd|mkfs|passwd)\b', re.I), "sudo_destructive"),
-    (re.compile(r'\|.*\bsh\b|\bsh\s+-c\b', re.I),                     "shell_pipeline_injection"),
-    (re.compile(r'base64\s+-d.*\|', re.I),                             "encoded_command_exec"),
-    (re.compile(r'python[23]?\s+-c\s+["\']', re.I),                   "inline_python_exec"),
-    (re.compile(r'/bin/(sh|bash|zsh)\s+-[ci]', re.I),                  "shell_exec"),
-    (re.compile(r'nc\s+-[el].*\d{4,5}', re.I),                        "reverse_shell_netcat"),
+# (pattern, name, base_confidence)
+FAST_DANGER_PATTERNS: list[tuple[re.Pattern, str, float]] = [
+    # High-specificity patterns — rarely appear in legitimate educational content
+    (re.compile(r'>\s*/etc/(passwd|shadow|crontab|sudoers|hosts)\b', re.I),  "system_file_write",           1.0),
+    (re.compile(r'echo\s+.+>>\s*/etc/', re.I),                               "system_file_append",          1.0),
+    (re.compile(r'nc\s+-[el].*\d{4,5}', re.I),                               "reverse_shell_netcat",        1.0),
+    (re.compile(r'base64\s+-d.*\|', re.I),                                    "encoded_command_exec",        1.0),
+    (re.compile(r'rm\s+-[rf]{1,2}\s+/', re.I),                               "destructive_delete",          0.9),
+    (re.compile(r'chmod\s+[0-7]*7[0-7]*\s+/', re.I),                         "privilege_escalation_chmod",  0.9),
+    # Fixed: was `\|.*\bsh\b` which matched any pipeline mentioning a .sh filename.
+    # Now requires the shell to appear as the direct pipeline target (end of line
+    # or followed only by flags/redirects), not buried inside a filename.
+    (re.compile(r'\|\s*(?:ba|z|da)?sh\s*(?:$|\s*(?:-[cis]+\b|&&|;|\|))', re.I | re.MULTILINE),
+                                                                              "shell_pipeline_injection",    0.95),
+    (re.compile(r'\bsh\s+-c\b', re.I),                                        "shell_exec_sh_c",             0.85),
+    # Medium-specificity — common in tutorials; context penalties matter here
+    (re.compile(r'\bcurl\s+https?://', re.I),                                 "unauthorized_curl",           0.75),
+    (re.compile(r'\bwget\s+https?://', re.I),                                 "unauthorized_wget",           0.75),
+    # sudo rm/dd/mkfs are high-risk; sudo chmod/chown/passwd are common in docs
+    (re.compile(r'\bsudo\s+(rm|dd|mkfs)\b', re.I),                           "sudo_destructive_high",       0.9),
+    (re.compile(r'\bsudo\s+(chmod|chown|passwd)\b', re.I),                   "sudo_destructive_medium",     0.55),
+    # Split from the original /bin/bash -c pattern: inline exec is lower confidence
+    (re.compile(r'/bin/(sh|bash|zsh)\s+-c\b', re.I),                         "shell_exec_bin",              0.65),
+    # python -c is a standard one-liner; only dangerous outside a code block
+    (re.compile(r'python[23]?\s+-c\s+["\']', re.I),                          "inline_python_exec",          0.6),
 ]
+
+# ── Context detection helpers ─────────────────────────────────────────────────
+
+# Matches fenced (``` ... ```) and indented (4-space / tab) Markdown code blocks
+_FENCED_BLOCK_RE = re.compile(r'```[^\n]*\n[\s\S]*?```', re.MULTILINE)
+_INLINE_CODE_RE = re.compile(r'`[^`\n]+`')
+
+_EDUCATIONAL_RE = re.compile(
+    r'\b(example|tutorial|demo|e\.g\.|for instance|shows?\s+how|demonstrates?|'
+    r'documentation|readme|note:|tip:|here\'s\s+how|you\s+can\s+use|'
+    r'the\s+following\s+command|run\s+this\s+command|snippet|sample\s+code)\b',
+    re.I,
+)
+
+# Penalty multipliers applied to base_confidence
+_PENALTY_CODE_BLOCK: float = 0.35   # match sits inside a Markdown code block
+_PENALTY_EDU_FRAMING: float = 0.65  # surrounding text has educational framing
+
+
+def _code_block_spans(text: str) -> list[tuple[int, int]]:
+    spans = [(m.start(), m.end()) for m in _FENCED_BLOCK_RE.finditer(text)]
+    spans += [(m.start(), m.end()) for m in _INLINE_CODE_RE.finditer(text)]
+    return spans
+
+
+def _in_code_block(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(s <= pos < e for s, e in spans)
 
 
 def fast_danger_check(text: str) -> list[DangerMatch]:
     """
-    Run all fast danger patterns against text.
-    Returns a list of DangerMatch for every pattern that fired.
-    Empty list means no fast-path danger detected.
+    Run all fast danger patterns against text and return scored DangerMatch objects.
+
+    Each match carries a `confidence` value (0–1). The caller should use
+    FAST_PATH_CONFIDENCE_THRESHOLD to decide whether to auto-quarantine or
+    defer to the Constitutional AI evaluator.
     """
+    spans = _code_block_spans(text)
+    has_edu = bool(_EDUCATIONAL_RE.search(text))
+
     matches: list[DangerMatch] = []
-    for pattern, name in FAST_DANGER_PATTERNS:
+    for pattern, name, base_conf in FAST_DANGER_PATTERNS:
         m = pattern.search(text)
-        if m:
-            matches.append(DangerMatch(pattern_name=name, matched_text=m.group(0)))
+        if not m:
+            continue
+        in_block = _in_code_block(m.start(), spans)
+        confidence = base_conf
+        if in_block:
+            confidence *= _PENALTY_CODE_BLOCK
+        if has_edu:
+            confidence *= _PENALTY_EDU_FRAMING
+        matches.append(DangerMatch(
+            pattern_name=name,
+            matched_text=m.group(0),
+            in_code_block=in_block,
+            confidence=round(confidence, 4),
+        ))
     return matches
