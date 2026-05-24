@@ -28,6 +28,47 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+# ── Append-Only List ──────────────────────────────────────────────────────────
+
+
+class AppendOnlyList(list):
+    """A list that only allows appending; all other mutators raise TypeError.
+
+    Used for audit_trail to guarantee the audit chain is truly append-only
+    at the Python runtime level.
+    """
+
+    def __delitem__(self, *args) -> None:
+        raise TypeError("audit_trail is append-only: deletion is not allowed")
+
+    def __setitem__(self, *args) -> None:
+        raise TypeError("audit_trail is append-only: modification is not allowed")
+
+    def __iadd__(self, *args) -> None:
+        raise TypeError("audit_trail is append-only: extend is not allowed")
+
+    def clear(self) -> None:
+        raise TypeError("audit_trail is append-only: clear is not allowed")
+
+    def pop(self, *args) -> None:
+        raise TypeError("audit_trail is append-only: pop is not allowed")
+
+    def remove(self, *args) -> None:
+        raise TypeError("audit_trail is append-only: remove is not allowed")
+
+    def insert(self, *args) -> None:
+        raise TypeError("audit_trail is append-only: insert is not allowed")
+
+    def reverse(self) -> None:
+        raise TypeError("audit_trail is append-only: reverse is not allowed")
+
+    def sort(self, *args, **kwargs) -> None:
+        raise TypeError("audit_trail is append-only: sort is not allowed")
+
+    def extend(self, *args) -> None:
+        raise TypeError("audit_trail is append-only: extend is not allowed")
+
+
 # ── Enumerations ──────────────────────────────────────────────────────────────
 
 
@@ -57,7 +98,13 @@ class AuditEventType(str, Enum):
 
 
 class AuditEvent(BaseModel):
-    """Immutable record of a single state change on a MemoryEntry."""
+    """Immutable record of a single state change on a MemoryEntry.
+
+    Each event carries a ``previous_event_hash`` (SHA-256 of the preceding
+    event's canonical JSON) so the full audit trail forms a tamper-evident
+    hash chain.  A gap or reorder in the chain is detectable by verifying
+    every link with :meth:`compute_hash`.
+    """
 
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     event_type: AuditEventType
@@ -65,8 +112,18 @@ class AuditEvent(BaseModel):
     actor: str  # e.g. "gateway.filter", "immune.detector", "scanner.periodic"
     detail: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    previous_event_hash: str = ""
 
     model_config = {"frozen": True}  # AuditEvents are truly immutable once created
+
+    def compute_hash(self) -> str:
+        """SHA-256 of canonical JSON, excluding the hash-chain field itself."""
+        data = self.model_dump(
+            mode="json", exclude={"previous_event_hash"}, exclude_none=True
+        )
+        return hashlib.sha256(
+            json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
 
 
 # ── Memory Entry ──────────────────────────────────────────────────────────────
@@ -106,11 +163,18 @@ class MemoryEntry(BaseModel):
     quarantine_reason: Optional[str] = None
 
     # ── Append-only audit trail ──
-    audit_trail: list[AuditEvent] = Field(default_factory=list)
+    audit_trail: AppendOnlyList[AuditEvent] = Field(default_factory=AppendOnlyList)
 
     model_config = {"arbitrary_types_allowed": True}
 
     # ── Validators ────────────────────────────────────────────────────────────
+
+    @field_validator("audit_trail", mode="before")
+    @classmethod
+    def _coerce_append_only(cls, v: object) -> object:
+        if isinstance(v, list) and not isinstance(v, AppendOnlyList):
+            return AppendOnlyList(v)
+        return v
 
     @field_validator("trust_score")
     @classmethod
@@ -124,6 +188,17 @@ class MemoryEntry(BaseModel):
                 self.content.encode("utf-8")
             ).hexdigest()
         return self
+
+    # ── Field-access guard ────────────────────────────────────────────────────
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Prevent wholesale replacement of ``audit_trail`` after initialisation."""
+        if name == "audit_trail" and "audit_trail" in self.__dict__:
+            raise AttributeError(
+                "audit_trail is append-only: direct replacement is not allowed. "
+                "Use add_audit_event() instead."
+            )
+        super().__setattr__(name, value)
 
     # ── Signing / Verification ────────────────────────────────────────────────
 
@@ -147,9 +222,21 @@ class MemoryEntry(BaseModel):
         return self
 
     def verify_signature(self, public_key: Ed25519PublicKey) -> bool:
-        """Return True if the stored signature matches the current payload."""
+        """Return True if the stored signature matches the current payload.
+
+        Cross-checks that ``content`` hashes to ``content_hash`` *before*
+        verifying the Ed25519 signature.  This ensures the signature, which
+        only covers ``content_hash``, cannot be bypassed by tampering with
+        *both* ``content`` and ``content_hash`` in tandem.
+        """
         if not self.cryptographic_sig:
             return False
+
+        # Cross-check: content must match content_hash
+        actual_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+        if actual_hash != self.content_hash:
+            return False
+
         try:
             sig_bytes = base64.b64decode(self.cryptographic_sig)
             public_key.verify(sig_bytes, self._signable_payload())
@@ -160,8 +247,34 @@ class MemoryEntry(BaseModel):
     # ── Audit-chain mutation methods ──────────────────────────────────────────
 
     def add_audit_event(self, event: AuditEvent) -> None:
-        """Append an audit event. This is the only sanctioned way to extend the trail."""
-        self.audit_trail.append(event)
+        """Append an audit event and link it into the hash chain.
+
+        The new event's ``previous_event_hash`` is set to the SHA-256 of
+        the preceding event (or ``""`` for the first event), forming a
+        tamper-evident chain.
+
+        Because ``AuditEvent`` is frozen, the method creates a copy of the
+        supplied event with the chain hash filled in, rather than mutating it.
+        """
+        prev_hash = (
+            self.audit_trail[-1].compute_hash() if self.audit_trail else ""
+        )
+        chained = event.model_copy(update={"previous_event_hash": prev_hash})
+        self.audit_trail.append(chained)
+
+    def verify_audit_chain(self) -> bool:
+        """Verify the integrity of the append-only audit hash chain.
+
+        Returns ``True`` if every event's ``previous_event_hash`` matches
+        the actual hash of its predecessor, meaning no events have been
+        removed, reordered, or tampered with.
+        """
+        prev_hash = ""
+        for event in self.audit_trail:
+            if event.previous_event_hash != prev_hash:
+                return False
+            prev_hash = event.compute_hash()
+        return True
 
     def quarantine(self, actor: str, reason: str) -> None:
         """Mark unsafe and append a QUARANTINED audit event."""

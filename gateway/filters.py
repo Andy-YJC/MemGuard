@@ -53,7 +53,7 @@ class SyncFilter:
     ) -> dict[str, re.Pattern]:
         patterns = pii_patterns or {
             "EMAIL":       r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
-            "PHONE_CN":    r"(?<!\d)(?:\+?86[-.\s]?)?1[3-9]\d(?:[-.\s]?\d){9}(?!\d)",
+            "PHONE_CN":    r"(?<!\d)(?:\+?86[-.\s]?)?1[3-9]\d(?:[-.\s]?\d){8}(?!\d)",
             "ID_CN":       r"(?<!\d)\d{17}[\dXx](?!\d)",
             "PHONE_US":    r"\b(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
             "CREDIT_CARD": r"\b\d{4}[\ \-]?\d{4}[\ \-]?\d{4}[\ \-]?\d{4}\b",
